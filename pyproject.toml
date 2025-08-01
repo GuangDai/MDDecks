@@ -1,0 +1,12 @@
+[project]
+name = "mddecks"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "cloudflare>=4.3.1",
+    "colorama>=0.4.6",
+    "requests>=2.32.4",
+    "structlog>=25.4.0",
+]
