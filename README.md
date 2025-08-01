@@ -61,3 +61,10 @@ parser_deploy.add_argument(
 可以部署到CloudflareWoker，注意要事先binding对应的数据库，并且`Variable name`设置为`DECK_DB`
 
 可以组合多种方式查询，详见`worker/src/utils/apiDocs.js`
+
+
+## 未来想法
+
+Update, Rate, Delete, Upload都可以通过github commit的方式直接加入/更新到deck_data，然后触发action，更新整个Cloudflare数据库，这样就实现了一个完全不依赖服务器的查询卡的系统。
+
+但是目前不知道这几个服务，neos之类的是怎么使用的，暂时不写了。应该不会太难加入。
