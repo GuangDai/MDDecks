@@ -36,7 +36,6 @@ query_decks是测试数据库搜索的功能的脚本。
         help="Force download all data before building.",
     )
     构筑Sqlite文件，然后导出SQL，之后清空Cloudflare里的数据库（原因如上所述），并上传导入到Cloudflare。
-    # --- 'deploy-d1' command ---
     parser_deploy = subparsers.add_parser(
         "deploy-d1", help="Build the local DB and deploy it to Cloudflare D1."
     )
