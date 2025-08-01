@@ -22,12 +22,12 @@ query_decks是测试数据库搜索的功能的脚本。
 1. main.py 
 
 支持以下参数。运行方式为`python main.py deploy-d1/build-local --update/force-update` update是更新资源文件，并不是更新数据库。每次运行main都会重新生成一个全新的数据库。原因是Cloudflare D1的API不支持同时多条带参数的sql语句，一条条插入非常慢。
-       
+
+根据deck_data文件夹下的json，构筑本地的sqlite文件
+
 parser_build = subparsers.add_parser(
     "build-local", help="Build the local SQLite database from source files."
 )
-    
-根据deck_data文件夹下的json，构筑本地的sqlite文件
     
 parser_build.add_argument(
     "--update", action="store_true", help="Check for data updates before building."
@@ -37,15 +37,19 @@ parser_build.add_argument(
     action="store_true",
     help="Force download all data before building.",
 )
+
 构筑Sqlite文件，然后导出SQL，之后清空Cloudflare里的数据库（原因如上所述），并上传导入到Cloudflare。
+
 parser_deploy = subparsers.add_parser(
     "deploy-d1", help="Build the local DB and deploy it to Cloudflare D1."
 )
+
 parser_deploy.add_argument(
     "--update",
     action="store_true",
     help="Check for data updates before building and deploying.",
 )
+
 parser_deploy.add_argument(
     "--force-update",
     action="store_true",
