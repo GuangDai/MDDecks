@@ -19,7 +19,7 @@ export default {
    * @param {object} env - 输入：环境变量对象，包含数据库等绑定。
    * @returns {Promise<Response>} - 输出：一个解析为 Response 对象的 Promise。
    */
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     // 处理 CORS 预检请求
     if (request.method === 'OPTIONS') {
       const headers = {
@@ -37,7 +37,7 @@ export default {
       switch (url.pathname) {
         case '/api/decks/search':
           if (request.method !== 'GET') return JsonResponse({ success: false, error: 'Method Not Allowed' }, 405);
-          return await handleSearchRequest(request, env);
+          return await handleSearchRequest(request, env, ctx);
 
         case '/api/decks/create':
           if (request.method !== 'POST') return JsonResponse({ success: false, error: 'Method Not Allowed' }, 405);
