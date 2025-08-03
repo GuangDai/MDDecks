@@ -5,7 +5,7 @@ build/
 dist/
 wheels/
 *.egg-info
-
+data/yugioh_decks.db
 # Virtual environments
 .venv
 .env
