@@ -1,6 +1,9 @@
 # database/build_database.py
+# database/build_database.py
 """
 Contains the core logic for building the local SQLite database from source files.
+This script orchestrates the entire build process by calling component functions
+from the processing module.
 """
 
 import os
@@ -20,6 +23,7 @@ from processing.builder import (
     populate_lookup_tables,
     process_cards,
     process_decks,
+    build_unified_search_index,
 )
 
 # Initialize logger if it hasn't been already
@@ -33,6 +37,10 @@ except structlog.exceptions.NotConfigured:
 def run_build_process() -> bool:
     """
     Executes the full local SQLite database build process.
+
+    This function coordinates a sequence of steps to build the database from scratch,
+    including schema creation, data population, and the final construction of
+    pre-computed search indexes for optimal performance.
 
     Returns:
         - bool: True if the build was successful, False otherwise.
@@ -54,31 +62,36 @@ def run_build_process() -> bool:
         db = SQLiteConnector()
         db.connect()
 
-        log.info("[1/7] Creating database schema...")
+        log.info("[1/8] Creating database schema...")
         create_schema(db)
         db.commit()
 
-        log.info("[2/7] Parsing local constants...")
+        log.info("[2/8] Parsing local constants...")
         maps = parse_local_constants()
-        log.info("[3/7] Populating lookup tables...")
+
+        log.info("[3/8] Populating lookup tables...")
         setcode_map = populate_lookup_tables(db, maps)
         db.commit()
 
-        log.info("[4/7] Processing card data...")
+        log.info("[4/8] Processing card data and building card-level index...")
         process_cards(db, maps, setcode_map)
         db.commit()
 
-        log.info("[5/7] Loading card alias ID map...")
+        log.info("[5/8] Loading card alias ID map...")
         alias_map = load_alias_map()
 
-        log.info("[6/7] Caching valid card IDs...")
+        log.info("[6/8] Caching valid card IDs for deck processing...")
         db.execute("SELECT id FROM Cards")
         rows = db.fetchall()
         valid_card_ids: Set[int] = {row["id"] for row in rows}
         log.info(f"Loaded {len(valid_card_ids)} valid card IDs.")
 
-        log.info("[7/7] Processing local deck files...")
+        log.info("[7/8] Processing local deck files...")
         process_decks(db, valid_card_ids, alias_map)
+        db.commit()
+
+        log.info("[8/8] Building unified search index for all terms to decks...")
+        build_unified_search_index(db)
         db.commit()
 
         total_time = time.time() - start_time

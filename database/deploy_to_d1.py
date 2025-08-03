@@ -16,6 +16,7 @@ import time
 from typing import Any
 import re
 
+import cloudflare
 import requests
 import structlog
 from cloudflare import Cloudflare
@@ -156,18 +157,22 @@ def _find_database_by_name(
 
 def clear_d1_database(client: Cloudflare, account_id: str, db_id: str) -> bool:
     """
-    Clears all tables from the specified D1 database without deleting the database itself.
+    Robustly clears all tables from a D1 database using an iterative retry strategy.
 
-    This non-destructive operation ensures all existing data is wiped while
-    preserving the database's UUID and any external bindings (e.g., from Workers).
+    This function does not rely on a predefined drop order. Instead, it repeatedly
+    tries to drop all remaining tables until the database is empty, automatically
+    resolving complex foreign key dependencies.
 
     Workflow:
-    1.  Executes a query against the D1 database to get a list of all existing tables
-        from the 'sqlite_master' schema table.
-    2.  It specifically excludes SQLite's internal tables (those starting with 'sqlite_').
-    3.  If no user tables are found, the operation is considered complete.
-    4.  If tables exist, it constructs a batch of `DROP TABLE IF EXISTS` SQL statements.
-    5.  It executes this batch query to delete all tables in a single API call.
+    1.  Fetches the initial list of all user tables to be deleted.
+    2.  Enters a main loop that continues as long as tables remain.
+    3.  In each pass, it attempts to drop every table in the current list.
+    4.  If a drop fails due to a 'FOREIGN KEY constraint failed' error, it is
+        considered a normal dependency issue, and the table is kept for the next pass.
+    5.  If an entire pass completes without dropping a single table, a stalemate
+        is declared (likely due to a circular dependency), and the function aborts.
+    6.  After the loop successfully empties the list, a final verification query
+        is run to guarantee the database has been cleared.
 
     Args:
         - client (Cloudflare): An authenticated `cloudflare-python` client instance.
@@ -175,54 +180,92 @@ def clear_d1_database(client: Cloudflare, account_id: str, db_id: str) -> bool:
         - db_id (str): The UUID of the database to clear.
 
     Returns:
-        - bool: True if the database was cleared successfully, False otherwise.
+        - bool: True if the database was successfully and verifiably cleared, False otherwise.
     """
-    log.info("Attempting to clear all tables from D1 database...", database_id=db_id)
-    try:
-        # 1. Query for all existing table names
-        list_tables_sql = "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '_%';"
-        log.info("Listing tables to be dropped...", query=list_tables_sql)
+    log.info(f"Starting robust clearing process for D1 database: {db_id}")
 
+    try:
+        # 1. Initial Step: Get all tables to be deleted.
+        list_tables_sql = "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE '\\_%' ESCAPE '\\';"
         query_response = client.d1.database.query(
             account_id=account_id, database_id=db_id, sql=list_tables_sql
         )
-
         if not query_response or not query_response.result:
             log.error("Received an invalid or empty response when listing tables.")
             return False
 
-        tables_to_drop = [row["name"] for row in query_response.result[0].results]
+        tables_to_delete = [row["name"] for row in query_response.result[0].results]
 
-        if not tables_to_drop:
-            log.info("Database is already empty. No tables to drop.")
+        if not tables_to_delete:
+            log.info("Database is already empty. No action needed.")
             return True
 
-        # 2. Generate and execute DROP TABLE statements
-        log.warning("Tables to be dropped:", tables=tables_to_drop)
-        drop_statements = [f"DROP TABLE IF EXISTS {name};" for name in tables_to_drop if not name.startswith("_") ]
-        batch_sql = " ".join(drop_statements)
-        if len(batch_sql) > 0:
-            log.info("Executing batch DROP TABLE statement...")
-            drop_response = client.d1.database.query(
-                account_id=account_id, database_id=db_id, sql=batch_sql
-            )
+        log.info(f"Found {len(tables_to_delete)} tables to delete: {tables_to_delete}")
 
-            if drop_response and drop_response.result and drop_response.result[0].success:
-                log.info("All existing tables cleared successfully from D1 database.")
-                return True
-            else:
-                log.error(
-                    "Failed to execute DROP TABLE statements.", response=drop_response
-                )
+        # 2. Main Loop: Keep trying until the list is empty or a stalemate occurs.
+        # Set a reasonable max number of passes to prevent theoretical infinite loops.
+        max_passes = len(tables_to_delete) + 1
+        for pass_num in range(1, max_passes + 1):
+            if not tables_to_delete:
+                break  # Exit loop early if we're done.
+
+            log.info(f"--- Deletion Pass {pass_num}, {len(tables_to_delete)} tables remaining ---")
+
+            failed_this_pass = []
+            num_succeeded_this_pass = 0
+
+            for table_name in tables_to_delete:
+                try:
+                    drop_sql = f'DROP TABLE "{table_name}";'
+                    log.info(f"Attempting to drop: {table_name}...")
+                    client.d1.database.query(
+                        account_id=account_id, database_id=db_id, sql=drop_sql
+                    )
+                    log.warning(f"Successfully dropped: {table_name}")
+                    num_succeeded_this_pass += 1
+
+                except cloudflare.BadRequestError as e:
+                    # Key error handling: Check if it's the expected foreign key error.
+                    if e.body and any("FOREIGN KEY constraint failed" in err.get('message', '') for err in e.body.get('errors', [])):
+                        log.warning(f"Failed to drop '{table_name}' (foreign key constraint), will retry in the next pass.")
+                        failed_this_pass.append(table_name)
+                    else:
+                        # It's a different 400 error, which is unexpected.
+                        log.critical(f"Unexpected API error while dropping '{table_name}'. Halting operation.", exc_info=True)
+                        return False
+
+                except Exception as e:
+                    # Catch any other unexpected exceptions.
+                    log.critical(f"Unknown exception while dropping '{table_name}'. Halting operation.", exc_info=True)
+                    return False
+
+            # 3. Stalemate Detection: If a full pass achieves nothing, stop.
+            if num_succeeded_this_pass == 0 and failed_this_pass:
+                log.critical(f"Deletion process stalled! No tables were successfully dropped in pass {pass_num}.")
+                log.critical(f"Unable to delete tables (possible circular dependency): {failed_this_pass}")
                 return False
-        else:
-            return  True
-    except Exception as e:
-        log.exception(
-            "An exception occurred while trying to clear the D1 database.", error=str(e)
-        )
-        return False
 
+            # Prepare the list for the next pass.
+            tables_to_delete = failed_this_pass
+
+        # 4. Final Verification
+        log.info("--- Deletion passes complete. Starting final verification. ---")
+
+        final_check_response = client.d1.database.query(
+            account_id=account_id, database_id=db_id, sql=list_tables_sql
+        )
+        remaining_tables = [row["name"] for row in final_check_response.result[0].results]
+
+        if not remaining_tables:
+            log.info("✅ Verification successful: Database has been fully cleared.")
+            return True
+        else:
+            log.error(f"❌ Verification Failed: The following tables could not be deleted: {remaining_tables}")
+            return False
+
+    except Exception as e:
+        log.critical("A critical exception occurred during the database clearing process.", exc_info=True)
+        return False
 
 def upload_and_import_sql(account_id: str, api_token: str, db_id: str) -> bool:
     """
@@ -270,7 +313,7 @@ def upload_and_import_sql(account_id: str, api_token: str, db_id: str) -> bool:
         init_res.raise_for_status()
         upload_data = init_res.json()["result"]
         upload_url = upload_data.get("upload_url")
-        if not upload_url:
+        if not upload_url and upload_data.get("success"):
             log.info("API 'init' response did not contain an 'upload_url'.",message=[upload_data])
             raise ValueError
         log.info("Import initialized, received R2 upload URL.")

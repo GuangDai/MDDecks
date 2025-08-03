@@ -23,6 +23,7 @@ import structlog
 DB_FILE = os.path.join(
     os.path.dirname(__file__), "data/yugioh_decks.db"
 )  # Default filename for the SQLite database.
+PREDEFINED_KEYWORDS_FILE = os.path.join(os.path.dirname(__file__), "data/keywords.json")
 DECK_DIR = os.path.join(
     os.path.dirname(__file__), "deck_data"
 )  # Directory where raw deck JSON files are stored.
