@@ -241,7 +241,8 @@ async function executePrimaryFilters(primaryFilters, db) {
             case 'setcode': {
                 const baseKeyword = await resolveKeywordPointer(filter.value, db);
                 const cardIdRes = await db.prepare("SELECT card_id FROM KeywordToCard WHERE keyword = ?").bind(baseKeyword).all();
-                idsFromThisFilter = await getDeckIdsForCardIds(cardIdRes.results.map(r => Number(r.id)), db);
+                const cardIds = cardIdRes.results.map(r => Number(r.card_id)); // Corrected, was r.id
+                idsFromThisFilter = await getDeckIdsForCardIds(cardIds, db);
                 break;
             }
             case 'race':
@@ -294,12 +295,32 @@ async function executeRefiningFilters(candidateDeckIds, refiningFilters, db) {
         
         let clause = '';
         let value;
+        
         switch (filter.type) {
-            case 'likes_ge':    clause = 'deck_like >= ?';   value = parseInt(filter.value, 10); break;
-            case 'likes_le':    clause = 'deck_like <= ?';   value = parseInt(filter.value, 10); break;
-            case 'after_date':  clause = 'update_date >= ?'; value = Math.floor(new Date(filter.value).getTime() / 1000); break;
-            case 'before_date': clause = 'update_date <= ?'; value = Math.floor(new Date(`${filter.value}T23:59:59.999Z`).getTime() / 1000); break;
-            default: continue;
+            case 'likes_ge':
+                clause = 'deck_like >= ?';
+                value = parseInt(filter.value, 10);
+                break;
+            case 'likes_le':
+                clause = 'deck_like <= ?';
+                value = parseInt(filter.value, 10);
+                break;
+            case 'after_date': {
+                clause = 'update_date >= ?';
+                const [year, month, day] = filter.value.split('-').map(Number);
+                // 使用 Date.UTC() 创建明确的UTC时间戳, 并确保是毫秒单位
+                value = Date.UTC(year, month - 1, day);
+                break;
+            }
+            case 'before_date': {
+                clause = 'update_date <= ?';
+                const [year, month, day] = filter.value.split('-').map(Number);
+                // 使用 Date.UTC() 创建明确的UTC时间戳, 代表一天的结束, 毫秒单位
+                value = Date.UTC(year, month - 1, day, 23, 59, 59, 999);
+                break;
+            }
+            default:
+                continue;
         }
 
         if (isNaN(value)) continue;
@@ -370,7 +391,7 @@ async function sortAndPaginateResults(deckIds, searchParams, db) {
         }
     });
 
-    const paginatedIds = allDecksWithSortData.slice(offset, offset + limit).map(d => d.deck_id);
+    const paginatedIds = allDecksWithSortData.slice(offset, offset + limit).map(d => String(d.deck_id)); // Corrected d.deck_id
     return { paginatedIds, total };
 }
 
@@ -440,6 +461,15 @@ export default async function handleSearchRequest(request, env, ctx) {
         finalDeckIds = await executeRefiningFilters(finalDeckIds, refiningFilters, env.DECK_DB);
 
         if (finalDeckIds.size === 0) {
+            if (unindexedTerms.size > 0 && env.GITHUB_KEYWORDS_FILE_PATH) {
+                ctx.waitUntil(updateGitHubFile({
+                    filePath: env.GITHUB_KEYWORDS_FILE_PATH,
+                    dataToAdd: [...unindexedTerms],
+                    commitMessage: `feat: 自动添加 ${unindexedTerms.size} 个新关键词`,
+                    env: env,
+                    merger: jsonArrayMerger
+                }));
+            }
             return JsonResponse({ success: true, data: { total: 0, start: offset, size: 0, list: [] } });
         }
 
